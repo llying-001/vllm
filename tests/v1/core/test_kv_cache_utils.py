@@ -1929,6 +1929,26 @@ def test_generate_scheduler_kv_cache_config_keeps_zeroing(
     assert scheduler_config.needs_kv_cache_zeroing is needs_zeroing
 
 
+def test_kv_cache_configs_record_largest_worker_bytes_per_block():
+    """PP stages hold different layers; every worker and the scheduler see the
+    largest stage's KV bytes per block (KV offload sizes worker slots by it)."""
+    config = VllmConfig(model_config=ModelConfig(max_model_len=128))
+    config.cache_config.kv_cache_layout = "LBNHC"
+    configs = get_kv_cache_configs(
+        config,
+        [
+            {f"layer_{i}": full_layer(new_kv_cache_spec()) for i in (2, 3)},
+            {f"layer_{i}": full_layer(new_kv_cache_spec()) for i in (0, 1, 4)},
+        ],
+        [2**20, 2**20],
+    )
+    per_worker = [cfg.kv_cache_tensors[0].size // cfg.num_blocks for cfg in configs]
+    assert per_worker[0] < per_worker[1]
+    assert [cfg.max_worker_bytes_per_block for cfg in configs] == [per_worker[1]] * 2
+    scheduler_config = generate_scheduler_kv_cache_config(configs)
+    assert scheduler_config.max_worker_bytes_per_block == per_worker[1]
+
+
 def test_resolve_dcp_kv_block_size_scales_only_sharded_groups():
     attention = AttentionSpec(
         block_size=16,

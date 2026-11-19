@@ -4,6 +4,7 @@
 
 from typing import TYPE_CHECKING
 
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import (
     is_mamba_group,
@@ -32,6 +33,8 @@ from vllm.v1.kv_offload.config import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
+
+logger = init_logger(__name__)
 
 
 def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...]:
@@ -167,6 +170,22 @@ def build_offloading_config(
         # so its size is the total, not a per-tensor share.
         total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
+        # The scheduler and every worker must agree on the chunk layout (one
+        # slot per worker), and pipeline stages hold different layers.
+        engine_bytes_per_block = kv_cache_config.max_worker_bytes_per_block
+        if (
+            engine_bytes_per_block is not None
+            and engine_bytes_per_block != worker_kv_bytes_per_block
+        ):
+            logger.info(
+                "KV offload: %d KV bytes per block on this worker, %d on the "
+                "largest worker of the engine; sizing worker slots by the latter",
+                worker_kv_bytes_per_block,
+                engine_bytes_per_block,
+            )
+            worker_kv_bytes_per_block = max(
+                worker_kv_bytes_per_block, engine_bytes_per_block
+            )
     elif kv_cache_config.num_blocks > 0:
         worker_kv_bytes_per_block = sum(
             group.page_size_bytes for _, group in selected_groups

@@ -493,6 +493,20 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.cache.blocks_per_chunk == 2
 
 
+@pytest.mark.parametrize(("engine_max", "expected"), [(None, 16), (24, 24), (8, 16)])
+def test_worker_slots_sized_by_largest_pipeline_stage(engine_max, expected):
+    """Every worker of a PP engine sizes its slot of a shared CPU chunk alike."""
+    config = _make_vllm_config(
+        extra_config={"block_size": 32}, pipeline_parallel_size=2
+    )
+    kv_cache_config = _make_sizing_kv_cache_config(packed=True)
+    kv_cache_config.max_worker_bytes_per_block = engine_max
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    assert offloading_config.worker_kv_bytes_per_block == expected
+
+
 def test_offloading_skips_scratch_group():
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
     kv_cache_config.kv_cache_groups.insert(
