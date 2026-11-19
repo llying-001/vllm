@@ -884,8 +884,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         """Whether the AITER custom AG/RS fast path may run for this collective.
 
         Requires:
-        - uniform batches
-        - FULL CUDAgraphs
+        - the same token count on every rank (sizes is None)
+        - a FULL CUDA graph (replayed, or being captured)
         """
         if (
             not self.use_aiter_ag_rs
@@ -903,10 +903,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             ctx = get_forward_context()
         except AssertionError:
             return False
-        if ctx.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+        # The GPU model runner captures a FULL graph by running the forward
+        # with cudagraph_runtime_mode=NONE inside torch.cuda.graph, without a
+        # batch descriptor. sizes is None already means every rank of the
+        # group has the same token count.
+        full_capture = (
+            ctx.cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and torch.cuda.is_current_stream_capturing()
+        )
+        if ctx.cudagraph_runtime_mode != CUDAGraphMode.FULL and not full_capture:
             return False
-        bd = ctx.batch_descriptor
-        return bd is not None and bd.uniform
+        logger.info_once("Using AITER custom AG/RS for group %s.", self.unique_name)
+        return True
 
     def suspend(self) -> None:
         from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
