@@ -876,6 +876,12 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
+    max_worker_bytes_per_block: int | None = field(default=None, compare=False)
+    """Largest KV bytes per block over the engine's workers, resolved by the
+    engine core (derived from the configs, so not compared). Pipeline stages
+    hold different layers, so a layout shared by all workers (one slot per
+    worker in each KV offload chunk) sizes every worker's slot by this value."""
+
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
 

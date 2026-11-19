@@ -1593,6 +1593,19 @@ def get_kv_cache_configs(
     for cfg in kv_cache_configs:
         cfg.needs_kv_cache_zeroing = needs_kv_cache_zeroing
 
+    # All configs share num_blocks; the tensors (one backing allocation per
+    # worker) differ in size across pipeline stages.
+    max_worker_bytes_per_block = max(
+        (
+            cfg.kv_cache_tensors[0].size // cfg.num_blocks
+            for cfg in kv_cache_configs
+            if cfg.kv_cache_tensors and cfg.num_blocks > 0
+        ),
+        default=None,
+    )
+    for cfg in kv_cache_configs:
+        cfg.max_worker_bytes_per_block = max_worker_bytes_per_block
+
     return kv_cache_configs
 
 
