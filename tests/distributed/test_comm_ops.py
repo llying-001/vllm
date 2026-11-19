@@ -606,6 +606,38 @@ def test_reduce_scatter_falls_back_when_pynccl_disabled(
 
 
 @pytest.mark.parametrize(
+    ("mode", "capturing", "sizes", "expected"),
+    [
+        ("FULL", False, None, True),
+        # The GPU model runner captures FULL graphs with the context in NONE.
+        ("NONE", True, None, True),
+        ("NONE", False, None, False),
+        ("PIECEWISE", True, None, False),
+        ("FULL", False, [3, 4], False),
+        (None, True, None, False),
+    ],
+)
+def test_aiter_ag_rs_gate(
+    monkeypatch: pytest.MonkeyPatch, mode, capturing, sizes, expected
+) -> None:
+    from vllm.config.compilation import CUDAGraphMode
+
+    def forward_context():
+        if mode is None:
+            raise AssertionError("no forward context")
+        return Mock(cudagraph_runtime_mode=CUDAGraphMode[mode], batch_descriptor=None)
+
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.use_aiter_ag_rs = True
+    communicator.aiter_ar_comm = Mock(disabled=False)
+    communicator.unique_name = "dp:0"
+    monkeypatch.setattr("vllm.forward_context.get_forward_context", forward_context)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+
+    assert communicator._can_use_aiter_ag_rs(sizes) is expected
+
+
+@pytest.mark.parametrize(
     ("enabled", "world_size", "shape", "dim", "dtype", "transpose", "aiter_args"),
     [
         (True, 4, (7, 1296), 0, torch.bfloat16, False, ((7, 1296), 0)),
