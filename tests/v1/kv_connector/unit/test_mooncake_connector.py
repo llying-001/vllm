@@ -1160,6 +1160,15 @@ def test_scheduler_request_finished():
     assert "id-1" in scheduler_connector._reqs_need_send
     assert scheduler_connector._reqs_need_send["id-1"][1] == [[10, 11]]
 
+    # Case: Stopped on its one sampled token (EOS / stop token). The prefill
+    # completed, so its KV is still sent to the decoder.
+    scheduler_connector._reqs_need_send.clear()
+    request.status = RequestStatus.FINISHED_STOPPED
+    delay_free, _ = scheduler_connector.request_finished(request, block_ids=([13],))
+    assert delay_free is True
+    assert scheduler_connector._reqs_need_send["id-1"][1] == [[13]]
+    assert "id-1" not in scheduler_connector._reqs_not_processed
+
     # Case: Aborted (No need to transfer, free blocks immediately)
     scheduler_connector._reqs_need_send.clear()
     request.status = RequestStatus.FINISHED_ABORTED
