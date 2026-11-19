@@ -1355,7 +1355,16 @@ class MooncakeConnectorScheduler:
 
         assert not self.is_kv_consumer
 
-        if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+        # A completed prefill can also stop on its one sampled token (EOS or a
+        # stop token). The decoder never reads that token, so its KV is handed
+        # over all the same; otherwise the decoder's pull waits for a send that
+        # never comes. Producers that drop the last prompt token (Mamba, DSV41
+        # SWA bounded replay) sample a guess at the dropped token, which is
+        # often a stop token.
+        if request.status not in (
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            RequestStatus.FINISHED_STOPPED,
+        ):
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
             self._reqs_not_processed.add(params["transfer_id"])
