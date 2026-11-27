@@ -174,6 +174,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
+    VLLM_ROCM_USE_TRITON_INDEXER_DECODE_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1549,6 +1550,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # select the recipe's parallel_topk feature or set this variable explicitly.
     "VLLM_ROCM_PARALLEL_INDEX_TOPK": lambda: (
         os.getenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0") == "1"
+    ),
+    # Exact Triton top-k for the uncompressed DSA indexer decode (DeepSeek-V3.2,
+    # GLM-5) on ROCm gfx950, FP8 and MXFP4 indexer caches: chunks every row
+    # over a persistent grid instead of one workgroup per row, so long-context
+    # rows do not set the step time. Up to 128 rows and k a power of two up to
+    # 2048; other shapes keep the existing top-k. Disabled by default.
+    "VLLM_ROCM_USE_TRITON_INDEXER_DECODE_TOPK": lambda: (
+        os.getenv("VLLM_ROCM_USE_TRITON_INDEXER_DECODE_TOPK", "False").lower()
+        in ("true", "1")
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(
