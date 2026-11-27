@@ -750,6 +750,41 @@ def test_reduce_scatter_falls_back_when_pynccl_disabled(
 
 
 @pytest.mark.parametrize(
+    ("mode", "sizes", "expected"),
+    [
+        ("FULL", None, True),
+        ("NONE", None, False),
+        ("PIECEWISE", None, False),
+        ("FULL", [3, 4], False),
+        (None, None, False),
+    ],
+)
+def test_aiter_ag_rs_gate(
+    monkeypatch: pytest.MonkeyPatch, mode, sizes, expected
+) -> None:
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.forward_context import BatchDescriptor
+
+    def forward_context():
+        if mode is None:
+            raise AssertionError("no forward context")
+        # FULL capture runs with the context's default batch descriptor, which
+        # is not marked uniform.
+        return Mock(
+            cudagraph_runtime_mode=CUDAGraphMode[mode],
+            batch_descriptor=BatchDescriptor(num_tokens=8),
+        )
+
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.use_aiter_ag_rs = True
+    communicator.aiter_ar_comm = Mock(disabled=False)
+    communicator.unique_name = "dp:0"
+    monkeypatch.setattr("vllm.forward_context.get_forward_context", forward_context)
+
+    assert communicator._can_use_aiter_ag_rs(sizes) is expected
+
+
+@pytest.mark.parametrize(
     ("enabled", "world_size", "shape", "dim", "dtype", "transpose", "aiter_args"),
     [
         (True, 4, (7, 1296), 0, torch.bfloat16, False, ((7, 1296), 0)),
