@@ -41,6 +41,10 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     exchange_shardq_topk,
     reserve_shardq_exchange,
 )
+from vllm.v1.attention.ops.rocm_triton_indexer_topk import (
+    triton_decode_top_k,
+    use_triton_decode_top_k,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -727,13 +731,15 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         _topk(scores[0], metadata.decode_block_ends, candidates, candidates.shape[1])
     elif candidates is not None:
         _apply_candidate_mask_strided(logits, None, lengths, candidates, layer.block)
-    _topk(
-        logits,
-        lengths,
-        layer.topk_buffer[:rows, : layer.topk_tokens],
-        layer.topk_tokens,
-        _decode_step_rows(metadata, rows),
-    )
+    out = layer.topk_buffer[:rows, : layer.topk_tokens]
+    if (
+        layer.compress_ratio == 1
+        and candidates is None
+        and use_triton_decode_top_k(logits, lengths, out, layer.topk_tokens)
+    ):
+        triton_decode_top_k(logits, lengths, out, layer.topk_tokens)
+        return
+    _topk(logits, lengths, out, layer.topk_tokens, _decode_step_rows(metadata, rows))
 
 
 def _gather_prefill(

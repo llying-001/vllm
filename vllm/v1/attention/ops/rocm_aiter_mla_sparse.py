@@ -31,6 +31,10 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.mxfp4_mla.read import load_mxfp4_rows
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
+from vllm.v1.attention.ops.rocm_triton_indexer_topk import (
+    triton_decode_top_k,
+    use_triton_decode_top_k,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -1781,6 +1785,7 @@ def rocm_aiter_sparse_attn_indexer(
 
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
+        row_lens = decode_metadata.seq_lens.reshape(-1)
 
         # FULL graphs are not keyed by context length, so use a replay-safe
         # upper bound when choosing the captured kernel.
@@ -1788,7 +1793,14 @@ def rocm_aiter_sparse_attn_indexer(
             max_compressed_seq_len = decode_max_model_len
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
-        if rocm_aiter_ops.is_indexer_top_k_supported(
+        if (
+            compress_ratio == 1
+            and candidate_blocks is None
+            and dcp_world_size == 1
+            and use_triton_decode_top_k(logits, row_lens, topk_indices, topk_tokens)
+        ):
+            triton_decode_top_k(logits, row_lens, topk_indices, topk_tokens)
+        elif rocm_aiter_ops.is_indexer_top_k_supported(
             is_prefill=False,
             compress_ratio=compress_ratio,
             num_rows=num_rows,
@@ -1802,7 +1814,7 @@ def rocm_aiter_sparse_attn_indexer(
             rocm_aiter_ops.indexer_top_k_decode(
                 logits,
                 1,
-                decode_metadata.seq_lens.reshape(-1),
+                row_lens,
                 topk_indices,
                 topk_tokens,
             )
