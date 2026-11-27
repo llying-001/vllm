@@ -174,6 +174,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
+    VLLM_ROCM_DSA_TRITON_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1549,6 +1550,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # select the recipe's parallel_topk feature or set this variable explicitly.
     "VLLM_ROCM_PARALLEL_INDEX_TOPK": lambda: (
         os.getenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0") == "1"
+    ),
+    # Use the single-pass Triton top-k for the uncompressed DSA indexer's
+    # decode rows (DeepSeek-V3.2, GLM-5) on ROCm gfx950 (MI355X), up to 128
+    # rows and k <= 2048. AITER's kernel, the default there, gives each row to
+    # one block, so a call takes as long as the step's longest context; this
+    # one makes one pass over all rows. Set to 1 to enable; disabled by default.
+    "VLLM_ROCM_DSA_TRITON_TOPK": lambda: (
+        os.getenv("VLLM_ROCM_DSA_TRITON_TOPK", "0") == "1"
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(

@@ -57,6 +57,17 @@ FP8_DTYPE = current_platform.fp8_dtype()
 _USE_FUSED_PAGED_MQA_LOGITS = _ON_GFX942 or _ON_GFX950 or _ON_RDNA
 
 
+@functools.cache
+def _triton_decode_topk():
+    """The single-pass decode top-k module when `VLLM_ROCM_DSA_TRITON_TOPK`
+    selects it, else None."""
+    if not (_ON_GFX950 and envs.VLLM_ROCM_DSA_TRITON_TOPK):
+        return None
+    from vllm.v1.attention.ops import rocm_triton_topk_decode
+
+    return rocm_triton_topk_decode
+
+
 def _decode_logits_workspace(num_rows: int, max_model_len: int) -> torch.Tensor:
     from vllm.model_executor.layers.indexer_topk import RADIX_TOPK_WORKSPACE_SIZE
 
@@ -1788,7 +1799,23 @@ def rocm_aiter_sparse_attn_indexer(
             max_compressed_seq_len = decode_max_model_len
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
-        if rocm_aiter_ops.is_indexer_top_k_supported(
+        row_lens = decode_metadata.seq_lens.reshape(-1)
+        triton_topk = _triton_decode_topk()
+        if (
+            triton_topk is not None
+            and compress_ratio == 1
+            and candidate_blocks is None
+            and dcp_world_size == 1
+            and row_lens.numel() == num_rows
+            and row_lens.dtype == torch.int32
+            and topk_indices.dtype == torch.int32
+            and topk_indices.stride(1) == 1
+            and triton_topk.supported(logits, topk_tokens)
+        ):
+            triton_topk.top_k_per_row_decode(
+                logits, row_lens, topk_indices, topk_tokens
+            )
+        elif rocm_aiter_ops.is_indexer_top_k_supported(
             is_prefill=False,
             compress_ratio=compress_ratio,
             num_rows=num_rows,
