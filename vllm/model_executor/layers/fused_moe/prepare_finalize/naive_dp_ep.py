@@ -6,7 +6,9 @@ from contextlib import contextmanager
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.distributed import get_ep_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -23,6 +25,32 @@ from vllm.v1.worker.ubatching import (
     dbo_switch_to_compute_sync,
     dbo_yield_and_switch_from_compute_to_comm,
 )
+
+# AITER picks its MoE kernels by token count; the ones used up to 128 tokens
+# read BF16 activations and cannot take pre-quantized input.
+_FP4_DISPATCH_MIN_TOKENS = 129
+_FP4_DISPATCH_MAX_TOKENS = 2048
+
+
+def _use_fp4_dispatch(
+    a1: torch.Tensor, quant_config: FusedMoEQuantConfig, defer_input_quant: bool
+) -> bool:
+    """Whether to dispatch AITER MXFP4 activations packed (see
+    `VLLM_ROCM_AITER_MOE_FP4_DISPATCH`)."""
+    if not (
+        envs.VLLM_ROCM_AITER_MOE_FP4_DISPATCH
+        and defer_input_quant
+        and quant_config.use_mxfp4_w4a4
+        and current_platform.is_rocm()
+        # The packed values and their scales are gathered as BF16.
+        and a1.shape[-1] % 64 == 0
+    ):
+        return False
+    dp_metadata = get_forward_context().dp_metadata
+    if dp_metadata is None or dp_metadata.local_sizes is None:
+        return False
+    num_tokens = sum(dp_metadata.local_sizes)
+    return _FP4_DISPATCH_MIN_TOKENS <= num_tokens <= _FP4_DISPATCH_MAX_TOKENS
 
 
 def _quantize_and_setup_dispatch(
@@ -188,9 +216,25 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+        fp4_dtypes: tuple[torch.dtype, torch.dtype] | None = None
+        if self._lora_context is None and _use_fp4_dispatch(
             a1, quant_config, defer_input_quant
-        )
+        ):
+            from aiter import QuantType, get_hip_quant
+
+            # Packed MXFP4 [M, K // 2] with unshuffled e8m0 scales [M, K // 32],
+            # as MoRI dispatches them: AITER fused_moe sorts the scales itself
+            # when its input is already quantized.
+            fp4, fp4_scale = get_hip_quant(QuantType.per_1x32)(a1, shuffle=False)
+            fp4_scale = fp4_scale[: a1.shape[0]].contiguous()
+            fp4_dtypes = (fp4.dtype, fp4_scale.dtype)
+            a1q = fp4.view(torch.bfloat16)
+            scales = [fp4_scale.view(torch.bfloat16)]
+            a1q_scale_orig = None
+        else:
+            a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+                a1, quant_config, defer_input_quant
+            )
 
         # When LoRA is active, dispatch the per-token LoRA id along with
         # hidden_states so every rank receives the correct mapping for the
@@ -235,7 +279,10 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 dispatched_lora_mapping = gathered_extras.pop()
                 assert lora_ctx is not None
                 lora_ctx.local_token_lora_mapping = dispatched_lora_mapping
-            if scales is not None:
+            if fp4_dtypes is not None:
+                a1q = a1q.view(fp4_dtypes[0])
+                a1q_scale = gathered_extras[0].view(fp4_dtypes[1])
+            elif scales is not None:
                 a1q_scale = _unwrap_scale_and_prepare_for_moe(
                     gathered_extras, quant_config
                 )
