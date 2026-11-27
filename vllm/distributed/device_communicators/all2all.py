@@ -86,6 +86,15 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert len(sizes) == comm_group.world_size
         return sizes
 
+    def gather(
+        self, tensor: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        """Gather the rows of one tensor from all dp ranks."""
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(tensor.shape[0], dist_group)
+        assert sizes[dist_group.rank_in_group] == tensor.shape[0]
+        return dist_group.all_gatherv(tensor, dim=0, sizes=sizes)
+
     def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,

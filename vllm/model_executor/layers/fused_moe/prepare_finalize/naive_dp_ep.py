@@ -197,6 +197,42 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         finally:
             dbo_switch_to_compute_sync()
 
+    def _dispatch_fp4_packed(
+        self,
+        a1: torch.Tensor,
+        fp4: torch.Tensor,
+        fp4_scale: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> mk.PrepareResultType | None:
+        """Dispatch the quantized activations, their scales and the routing
+        with one all-gather, if the all2all manager and the inputs allow it."""
+        from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
+        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+            fp4_dispatch_pack,
+        )
+
+        manager = getattr(
+            getattr(get_ep_group(), "device_communicator", None),
+            "all2all_manager",
+            None,
+        )
+        if not isinstance(
+            manager, AgRsAll2AllManager
+        ) or not fp4_dispatch_pack.can_pack(a1, topk_ids, topk_weights):
+            return None
+        layout = fp4_dispatch_pack.packed_row(a1.shape[1], topk_ids.shape[1])
+        rows = fp4_dispatch_pack.pack(fp4, fp4_scale, topk_ids, topk_weights, layout)
+        with self._comm_region():
+            # Gathered as BF16 so the collective takes its usual path.
+            gathered = manager.gather(
+                rows.view(torch.bfloat16), self.is_sequence_parallel
+            )
+        a1q, a1q_scale, topk_ids, topk_weights = fp4_dispatch_pack.unpack(
+            gathered, layout
+        )
+        return a1q, a1q_scale, None, topk_ids, topk_weights
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -227,6 +263,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             # when its input is already quantized.
             fp4, fp4_scale = get_hip_quant(QuantType.per_1x32)(a1, shuffle=False)
             fp4_scale = fp4_scale[: a1.shape[0]].contiguous()
+            packed = self._dispatch_fp4_packed(
+                a1, fp4, fp4_scale, topk_ids, topk_weights
+            )
+            if packed is not None:
+                return packed
             fp4_dtypes = (fp4.dtype, fp4_scale.dtype)
             a1q = fp4.view(torch.bfloat16)
             scales = [fp4_scale.view(torch.bfloat16)]
