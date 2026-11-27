@@ -112,6 +112,15 @@ def _use_mxfp4_dispatch(
     return use_mxfp4_dispatch(num_tokens, a1.shape[1])
 
 
+def _packed_dispatch_manager():
+    """The EP group's all-gather/reduce-scatter all2all manager, which can
+    gather a packed dispatch buffer; None for any other manager."""
+    from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
+
+    manager = getattr(get_ep_group().device_communicator, "all2all_manager", None)
+    return manager if isinstance(manager, AgRsAll2AllManager) else None
+
+
 def _unwrap_scale_and_prepare_for_moe(
     scales: list[torch.Tensor] | None,
     quant_config: FusedMoEQuantConfig,
@@ -217,6 +226,43 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         finally:
             dbo_switch_to_compute_sync()
 
+    def _dispatch_packed_mxfp4(
+        self,
+        values: torch.Tensor,
+        scales: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> mk.PrepareResultType | None:
+        """Gather the MXFP4 dispatch's values, scales, topk ids and topk
+        weights as one packed buffer (one all-gather instead of four); None
+        when it does not apply and the four tensors go separately."""
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+            mxfp4_dispatch_pack as pack,
+        )
+
+        if not rocm_aiter_ops.is_fused_moe_fp4_dispatch_pack_enabled():
+            return None
+        manager = _packed_dispatch_manager()
+        # The layout only depends on shapes and dtypes, which every rank
+        # shares, so all ranks take the same path.
+        layout = pack.mxfp4_dispatch_layout(values, scales, topk_weights, topk_ids)
+        if manager is None or layout is None:
+            return None
+        buffer = pack.pack_mxfp4_dispatch(
+            values, scales, topk_weights, topk_ids, layout
+        )
+        with self._comm_region():
+            # Gathered as a BF16 view, which the all-gather backends take.
+            gathered = manager.dispatch_packed(
+                buffer.view(torch.bfloat16), self.is_sequence_parallel
+            )
+        a1q, a1q_scale, topk_weights, topk_ids = pack.unpack_mxfp4_dispatch(
+            gathered, layout, values.dtype, scales.dtype
+        )
+        topk_ids = _localize_shared_expert_ids(topk_ids)
+        return a1q, a1q_scale, None, topk_ids, topk_weights
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -249,6 +295,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             # from the gathered rows. The packed values and the scales are
             # gathered as BF16 views, which the all-gather backends take.
             a1q, a1q_scale_orig = quantize_mxfp4_for_dispatch(a1)
+            packed = self._dispatch_packed_mxfp4(
+                a1q, a1q_scale_orig, topk_weights, topk_ids
+            )
+            if packed is not None:
+                return packed
             mxfp4_dtypes = (a1q.dtype, a1q_scale_orig.dtype)
             a1q = a1q.view(torch.bfloat16)
             scales = [a1q_scale_orig.view(torch.bfloat16)]
