@@ -400,7 +400,7 @@ def rocm_aiter_fused_experts(
     assert moe_config.intermediate_size_per_partition_unpadded is not None
     hidden_size = hidden_states.shape[1]
     if hidden_states.dtype == torch.float4_e2m1fn_x2:
-        # Pre-quantized MXFP4 from MoRI dispatch, packed two per byte.
+        # Pre-quantized MXFP4 from the dispatch, packed two per byte.
         hidden_size *= 2
     hidden_pad = hidden_size - moe_config.hidden_dim_unpadded
     intermediate_pad = (
@@ -567,10 +567,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # Workspaces are managed internally by AITER.
         workspace1 = (0,)
         workspace2 = (0,)
-        # MoRI dispatches MXFP4 activations packed two per byte, so K is
-        # half the hidden size there.
-        packed_fp4_input = (
-            self.moe_config.use_mori_epv1_kernels and self.quant_config.use_mxfp4_w4a4
+        # MoRI and the FP4 all-gather dispatch hand over MXFP4 activations
+        # packed two per byte, so K is half the hidden size there.
+        packed_fp4_input = self.quant_config.use_mxfp4_w4a4 and (
+            self.moe_config.use_mori_epv1_kernels or self.moe_config.hidden_dim == K * 2
         )
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)

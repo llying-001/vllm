@@ -167,6 +167,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_AITER_MOE_FP4_DISPATCH: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1479,6 +1480,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
+    ),
+    # With data parallelism and the allgather_reducescatter all2all backend,
+    # quantize MXFP4 (W4A4) AITER MoE activations on each rank before the
+    # dispatch all-gather instead of after it: the gather then moves the packed
+    # values and their scales, about a quarter of the BF16 hidden states.
+    # Applies while the gathered step holds 129-2048 tokens.
+    # By default is disabled.
+    "VLLM_ROCM_AITER_MOE_FP4_DISPATCH": lambda: (
+        os.getenv("VLLM_ROCM_AITER_MOE_FP4_DISPATCH", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
