@@ -220,7 +220,11 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.eng_start_index = 0
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
+        parallel_config=SimpleNamespace(
+            all2all_backend="allgather_reducescatter",
+            data_parallel_lb_kv_weight=0.0,
+        ),
+        cache_config=SimpleNamespace(kv_cache_size_tokens=None),
     )
     return client
 
@@ -396,6 +400,27 @@ def test_dplb_kv_pressure_amplifies_waiting_penalty():
         make_request(SamplingParams(max_tokens=1))
     )
     assert chosen == client.core_engines[0]
+
+
+def test_dplb_kv_weight_prefers_the_emptier_cache():
+    """With data_parallel_lb_kv_weight a nearly full KV cache outweighs a
+    request-count lead, and the routed prompt counts against the chosen engine
+    until the next stats update."""
+    counts = [[0, 14, 0.97], [0, 16, 0.80], [0, 15, 0.60]]
+    request = make_request(SamplingParams(max_tokens=1), [0] * 1000)
+
+    client = _make_dplb_client()
+    client.lb_engines = [list(count) for count in counts]
+    assert client.get_core_engine_for_request(request) == client.core_engines[0]
+    assert client.lb_engines[0][2] == 0.97
+
+    client = _make_dplb_client()
+    client.vllm_config.parallel_config.data_parallel_lb_kv_weight = 14.0
+    client.vllm_config.cache_config.kv_cache_size_tokens = 10_000
+    client.lb_engines = [list(count) for count in counts]
+    request = make_request(SamplingParams(max_tokens=1), [0] * 1000)
+    assert client.get_core_engine_for_request(request) == client.core_engines[2]
+    assert client.lb_engines[2][2] == pytest.approx(0.70)
 
 
 def test_dplb_finished_requests_release_inflight():
