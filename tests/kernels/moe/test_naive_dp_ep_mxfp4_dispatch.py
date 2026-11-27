@@ -48,8 +48,16 @@ def _run_prepare(num_tokens: int | None, enabled: bool = True, **prepare_kwargs)
     ep_group = MagicMock()
     ep_group.dispatch.side_effect = _gather
     localize = MagicMock(side_effect=lambda t: t)
+    # The fields the non-FP4 path reads; quant_dtype=None leaves activations BF16.
     quant_config = SimpleNamespace(
-        use_mxfp4_w4a4=prepare_kwargs.pop("use_mxfp4_w4a4", True)
+        use_mxfp4_w4a4=prepare_kwargs.pop("use_mxfp4_w4a4", True),
+        use_nvfp4_w4a4=False,
+        a1_scale=None,
+        a1_gscale=None,
+        quant_dtype=None,
+        per_act_token_quant=False,
+        block_shape=None,
+        mx_alignment=None,
     )
     pf = naive_dp_ep.MoEPrepareAndFinalizeNaiveDPEPModular()
     if prepare_kwargs.pop("lora", False):
