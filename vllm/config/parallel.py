@@ -291,6 +291,12 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    data_parallel_lb_kv_weight: float = Field(default=0.0, ge=0.0)
+    """Weight of an engine's KV cache usage in the internal and hybrid DP
+    load balancer. The balancer picks the engine with the lowest score of
+    waiting + running requests; this adds `weight * kv_cache_usage` (usage in
+    0-1), so the value is the number of requests a full KV cache counts as.
+    0 (default) balances by request counts alone."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_hc_sp: bool = False
@@ -1140,6 +1146,7 @@ class ParallelConfig:
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
+            "data_parallel_lb_kv_weight",
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",

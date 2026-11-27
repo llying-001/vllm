@@ -1852,6 +1852,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         ) is None:
             current_counts = self.lb_engines
+            kv_weight = self.vllm_config.parallel_config.data_parallel_lb_kv_weight
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
             min_score: float = sys.maxsize
@@ -1878,12 +1879,23 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     # the penalty stays off, preserving exact round-robin.
                     # Ramps from 0 at <=50% usage to 3x waiting at 100%.
                     score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
+                # A DP group steps at the pace of its slowest rank, which
+                # grows with the context that rank holds as well as with its
+                # request count.
+                score += kv_weight * kv_cache_usage
                 if score < min_score:
                     min_score = score
                     eng_index = idx
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
+            kv_tokens = self.vllm_config.cache_config.kv_cache_size_tokens
+            prompt_ids = request.prompt_token_ids
+            if kv_weight and kv_tokens and prompt_ids is not None:
+                # Likewise for the KV the prompt is about to take.
+                current_counts[eng_index][2] += (
+                    self.client_count * len(prompt_ids) / kv_tokens
+                )
             # Rotate the scan start so that ties (equal scores, e.g. right
             # after a coordinator stats reset when engines look equally loaded)
             # don't systematically favor the same engine. This removes the
