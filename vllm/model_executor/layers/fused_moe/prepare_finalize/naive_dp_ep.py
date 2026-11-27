@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -72,6 +73,43 @@ def _localize_shared_expert_ids(topk_ids: torch.Tensor) -> torch.Tensor:
     )
 
     return localize_fused_shared_expert_ids(topk_ids)
+
+
+def _num_dispatched_tokens() -> int | None:
+    """Rows the dispatch all-gathers, summed over the ranks; None when the DP
+    chunk sizes are not known."""
+    if not is_forward_context_available():
+        return None
+    dp_metadata = get_forward_context().dp_metadata
+    if dp_metadata is None or dp_metadata.local_sizes is None:
+        return None
+    return sum(dp_metadata.local_sizes)
+
+
+def _use_mxfp4_dispatch(
+    a1: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    defer_input_quant: bool,
+) -> bool:
+    """Whether to quantize to MXFP4 before the all-gather for experts that
+    would quantize the gathered rows themselves (ROCm AITER, see
+    `use_mxfp4_dispatch`)."""
+    if not (
+        current_platform.is_rocm()
+        and defer_input_quant
+        and quant_config.use_mxfp4_w4a4
+        and a1.dtype == torch.bfloat16
+        and a1.dim() == 2
+    ):
+        return False
+    num_tokens = _num_dispatched_tokens()
+    if num_tokens is None:
+        return False
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        use_mxfp4_dispatch,
+    )
+
+    return use_mxfp4_dispatch(num_tokens, a1.shape[1])
 
 
 def _unwrap_scale_and_prepare_for_moe(
@@ -198,9 +236,26 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+        mxfp4_dtypes: tuple[torch.dtype, torch.dtype] | None = None
+        if self._lora_context is None and _use_mxfp4_dispatch(
             a1, quant_config, defer_input_quant
-        )
+        ):
+            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+                quantize_mxfp4_for_dispatch,
+            )
+
+            # The quantization is per row, so quantizing each rank's rows
+            # before the gather gives the bytes the experts would compute
+            # from the gathered rows. The packed values and the scales are
+            # gathered as BF16 views, which the all-gather backends take.
+            a1q, a1q_scale_orig = quantize_mxfp4_for_dispatch(a1)
+            mxfp4_dtypes = (a1q.dtype, a1q_scale_orig.dtype)
+            a1q = a1q.view(torch.bfloat16)
+            scales = [a1q_scale_orig.view(torch.bfloat16)]
+        else:
+            a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+                a1, quant_config, defer_input_quant
+            )
 
         # When LoRA is active, dispatch the per-token LoRA id along with
         # hidden_states so every rank receives the correct mapping for the
@@ -245,7 +300,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 dispatched_lora_mapping = gathered_extras.pop()
                 assert lora_ctx is not None
                 lora_ctx.local_token_lora_mapping = dispatched_lora_mapping
-            if scales is not None:
+            if mxfp4_dtypes is not None:
+                assert len(gathered_extras) == 1
+                a1q = a1q.view(mxfp4_dtypes[0])
+                a1q_scale = gathered_extras[0].view(mxfp4_dtypes[1])
+            elif scales is not None:
                 a1q_scale = _unwrap_scale_and_prepare_for_moe(
                     gathered_extras, quant_config
                 )

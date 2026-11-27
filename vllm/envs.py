@@ -167,6 +167,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_USE_AITER_MOE_FP4_DISPATCH: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1478,6 +1479,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
+        in ("true", "1")
+    ),
+    # Naive DP dispatch to AITER's MXFP4 W4A4 fused MoE (gfx950): quantize each
+    # rank's hidden states to MXFP4 before the all-gather instead of letting
+    # the kernel quantize the gathered BF16 rows, so the gather moves about a
+    # quarter of the bytes. Same per-1x32 quantization, applied per row.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_MOE_FP4_DISPATCH": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MOE_FP4_DISPATCH", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.

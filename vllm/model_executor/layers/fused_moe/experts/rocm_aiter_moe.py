@@ -132,6 +132,45 @@ def localize_fused_shared_expert_ids(topk_ids: torch.Tensor) -> torch.Tensor:
     return topk_ids
 
 
+# AITER's fused MoE picks its kernels by the next power of two of the token
+# count. Up to 128 tokens it runs block_m 16 kernels that read BF16
+# activations and cannot take pre-quantized MXFP4 input; from 256 to 2048
+# tokens it runs block_m >= 32 kernels with MXFP4 activations, which skip the
+# quantization when the input already is MXFP4 and only sort the scales.
+_MXFP4_DISPATCH_MIN_TOKENS = 128  # exclusive
+_MXFP4_DISPATCH_MAX_TOKENS = 2048
+
+
+def use_mxfp4_dispatch(num_dispatched_tokens: int, hidden_size: int) -> bool:
+    """Whether a naive DP dispatch of `num_dispatched_tokens` rows (summed over
+    the ranks, so every rank decides the same) should quantize to MXFP4 before
+    the all-gather. The caller checks that the experts are MXFP4 W4A4 and
+    quantize their own input."""
+    return (
+        bool(rocm_aiter_ops.is_fused_moe_fp4_dispatch_enabled())
+        # The packed values (K / 2 bytes) and e8m0 scales (K / 32 bytes) are
+        # gathered as BF16 views.
+        and hidden_size % 64 == 0
+        and _MXFP4_DISPATCH_MIN_TOKENS
+        < num_dispatched_tokens
+        <= _MXFP4_DISPATCH_MAX_TOKENS
+    )
+
+
+def quantize_mxfp4_for_dispatch(
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Packed MXFP4 [M, K // 2] and e8m0 scales [M, K // 32], as AITER's fused
+    MoE quantizes its BF16 input (per 1x32, unshuffled scales: the kernel sorts
+    them itself), so quantizing before or after the gather gives the same
+    bytes."""
+    from aiter import QuantType, get_hip_quant
+
+    q, scale = get_hip_quant(QuantType.per_1x32)(hidden_states, shuffle=False)
+    # The scale rows may be padded.
+    return q, scale[: hidden_states.shape[0]].contiguous()
+
+
 def inject_shared_expert_weights(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -430,7 +469,8 @@ def rocm_aiter_fused_experts(
     assert moe_config.intermediate_size_per_partition_unpadded is not None
     hidden_size = hidden_states.shape[1]
     if hidden_states.dtype == torch.float4_e2m1fn_x2:
-        # Pre-quantized MXFP4 from MoRI dispatch, packed two per byte.
+        # Pre-quantized MXFP4 from the MoRI or naive DP dispatch, packed two
+        # per byte.
         hidden_size *= 2
     hidden_pad = hidden_size - moe_config.hidden_dim_unpadded
     intermediate_pad = (
@@ -597,10 +637,15 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # Workspaces are managed internally by AITER.
         workspace1 = (0,)
         workspace2 = (0,)
-        # MoRI dispatches MXFP4 activations packed two per byte, so K is
-        # half the hidden size there.
-        packed_fp4_input = (
-            self.moe_config.use_mori_epv1_kernels and self.quant_config.use_mxfp4_w4a4
+        # MoRI and the MXFP4 naive DP dispatch (`use_mxfp4_dispatch`) send
+        # MXFP4 activations packed two per byte, so K is half the hidden size
+        # there.
+        packed_fp4_input = self.quant_config.use_mxfp4_w4a4 and (
+            self.moe_config.use_mori_epv1_kernels
+            or (
+                bool(rocm_aiter_ops.is_fused_moe_fp4_dispatch_enabled())
+                and self.moe_config.hidden_dim == K * 2
+            )
         )
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
