@@ -2413,6 +2413,7 @@ class rocm_aiter_ops:
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_FP4_DISPATCH = envs.VLLM_ROCM_USE_AITER_MOE_FP4_DISPATCH
+    _MOE_FP4_DISPATCH_PACK = envs.VLLM_ROCM_USE_AITER_MOE_FP4_DISPATCH_PACK
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
@@ -2447,6 +2448,7 @@ class rocm_aiter_ops:
         )
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_FP4_DISPATCH = envs.VLLM_ROCM_USE_AITER_MOE_FP4_DISPATCH
+        cls._MOE_FP4_DISPATCH_PACK = envs.VLLM_ROCM_USE_AITER_MOE_FP4_DISPATCH_PACK
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
@@ -2549,6 +2551,15 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx950
 
         return cls.is_fused_moe_enabled() and cls._MOE_FP4_DISPATCH and on_gfx950()
+
+    @classmethod
+    @if_aiter_supported
+    def is_fused_moe_fp4_dispatch_pack_enabled(cls) -> bool:
+        """Whether the MXFP4 naive DP dispatch gathers its four tensors as one
+        packed buffer (VLLM_ROCM_USE_AITER_MOE_FP4_DISPATCH_PACK)."""
+        return (
+            bool(cls.is_fused_moe_fp4_dispatch_enabled()) and cls._MOE_FP4_DISPATCH_PACK
+        )
 
     @classmethod
     @if_aiter_supported

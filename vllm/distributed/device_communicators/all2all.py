@@ -150,6 +150,16 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
         return hidden_states, topk_weights, topk_ids, gathered_tensors[3:]
 
+    def dispatch_packed(
+        self, packed: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        """Gather one tensor of per-token rows from all dp ranks, for a
+        dispatch that packs its hidden states and routing into one buffer."""
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(packed.shape[0], dist_group)
+        assert sizes[dist_group.rank_in_group] == packed.shape[0]
+        return dist_group.all_gatherv(packed, dim=0, sizes=sizes)
+
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
